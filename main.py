@@ -89,73 +89,82 @@ async def receive_audio_chunk(file: UploadFile = File(...), persona: str = Form(
         if not raw_text:
             return {"status": "success", "text": ""}
         
-        print(f"📻 [Whisper ดิบ]: {raw_text}")
+        print(f"📻 [Whisper]: {raw_text}")
+        meeting_transcripts.append(raw_text)
+        
+        # กฎข้อ 2: ถ้าเป็นโหมด Podcast ให้คืนค่าซับไตเติ้ลเลย
+        if persona in PASSIVE_MODES:
+            return {"status": "success", "text": raw_text}
 
+        # กฎข้อ 1: โหมดผู้ช่วย ให้ AI วิเคราะห์ว่าควรตอบไหม (ไม่มี ✨)
         rag_injection = ""
         if user_context_data:
             rag_injection = f"\n[ข้อมูลอ้างอิงของผู้ใช้]:\n{user_context_data}\n"
 
-        # ----------------------------------------------------
-        # 🧠 กระบวนการ AI กรองคำเพี้ยนตามบริบท (Context-Aware)
-        # ----------------------------------------------------
-        if persona in PASSIVE_MODES:
-            # โหมดผู้ฟัง (Podcast) ให้กรองคำผิดอย่างเดียว ห้ามตอบ
-            dynamic_system_prompt = f"""
-            คุณคือ AI ผู้เชี่ยวชาญด้านการกรองและแก้ไขคำผิดจากการถอดเสียง
-            [บริบทการสนทนาที่ผ่านมา]: {last_context}
-            {rag_injection}
-            [ข้อความที่ถอดเสียงมาได้]: "{raw_text}"
-            
-            หน้าที่ของคุณ:
-            1. ตรวจสอบ "ข้อความที่ถอดเสียงมาได้" ว่ามีคำที่ฟังเพี้ยนหรือไม่ (เช่น ได้ยินเป็น 'Exterword' แต่บริบทคือจิตวิทยา ควรแก้เป็น 'Extrovert')
-            2. หากมีการเปลี่ยนหัวข้อ ให้คิดตามหัวข้อใหม่และแก้ไขคำศัพท์ให้สอดคล้องกัน
-            3. คืนค่าเฉพาะ "ข้อความที่แก้ไขให้ถูกต้องตามบริบทแล้ว" เท่านั้น ห้ามตอบคำถาม ห้ามอธิบาย ห้ามสรุปเด็ดขาด
-            """
-        else:
-            # โหมดผู้ช่วย (Persona อื่นๆ) กรองคำผิดก่อน แล้วค่อยดูว่าต้องช่วยตอบไหม
-            dynamic_system_prompt = f"""
-            คุณคือผู้ช่วย AI อัจฉริยะในโหมด '{persona}'
-            [บริบทการสนทนาที่ผ่านมา]: {last_context}
-            {rag_injection}
-            [ข้อความที่ถอดเสียงมาได้]: "{raw_text}"
-            
-            กฎเหล็กที่ต้องปฏิบัติอย่างเคร่งครัด:
-            1. ขั้นแรก: ตรวจสอบและเกลา "ข้อความที่ถอดเสียงมาได้" ให้ถูกต้องตามบริบทก่อนหน้า (เช่น หากฟังเพี้ยนเป็น 'Exterword' ให้แก้เป็น 'Extrovert')
-            2. ขั้นที่สอง: วิเคราะห์ว่าข้อความที่เกลาแล้ว มี "คำถามที่ต้องการคำตอบ" "ข้อร้องขอ" หรือ "การสั่งงาน" หรือไม่
-            3. ถ้ามี: ให้พิมพ์ข้อความที่เกลาแล้ว ขึ้นบรรทัดใหม่ พิมพ์ "💡 [AI]: " ตามด้วยคำตอบหรือคำแนะนำของคุณ (ไม่เกิน 2 ประโยค)
-            4. ถ้าไม่มี (เป็นการพูดคุยทั่วไป): ให้ส่งเฉพาะ "ข้อความที่เกลาแล้ว" กลับมาเท่านั้น ห้ามเติมคำอื่นเด็ดขาด
-            5. ห้ามใช้เครื่องหมาย ✨ (ดาววิบวับ) หรือโควตเด็ดขาด
-            """
-            
+        dynamic_system_prompt = f"""
+        คุณคือผู้ช่วย AI อัจฉริยะในโหมด '{persona}'
+        ข้อความเรียลไทม์ที่เพิ่งพูด: "{raw_text}"
+        {rag_injection}
+        
+        กฎเหล็กที่ต้องปฏิบัติอย่างเคร่งครัด:
+        1. วิเคราะห์ว่าข้อความนี้มี "คำถามที่ต้องการคำตอบ" "ข้อร้องขอ" หรือ "การสั่งงาน" หรือไม่
+        2. ถ้ามี: ให้พิมพ์ข้อความดิบ "{raw_text}" แล้วขึ้นบรรทัดใหม่ พิมพ์ "💡 [AI]: " ตามด้วยคำตอบหรือคำแนะนำของคุณ (ไม่เกิน 2 ประโยค)
+        3. ถ้าไม่มี (เป็นการพูดคุยทั่วไป): ให้ส่งข้อความดิบ "{raw_text}" กลับไปเลย ห้ามเติมคำอื่นเด็ดขาด
+        4. ห้ามใช้เครื่องหมาย ✨ (ดาววิบวับ) หรือโควตเด็ดเด็ดขาด 
+        """
+        
         try:
             correction = client.chat.completions.create(
                 model="llama-3.1-8b-instant", 
                 messages=[
                     {"role": "system", "content": dynamic_system_prompt},
-                    {"role": "user", "content": "กรุณาทำงานตามกฎอย่างเคร่งครัด"}
+                    {"role": "user", "content": f"[Context ก่อนหน้า: {last_context}]\nวิเคราะห์และตอบตามกฎอย่างเคร่งครัด"}
                 ],
                 temperature=0.1, 
             )
             filtered_text = correction.choices[0].message.content.strip()
+            last_context = filtered_text[-300:]
+            print(f"🤖 [AI]: {filtered_text}\n" + "-"*50)
             
-            # ตัดส่วนที่เป็นคำตอบ AI ออก (💡 [AI]:) เพื่อเก็บเฉพาะคำพูดของคนลงในประวัติ
-            text_to_save = filtered_text.split("💡 [AI]:")[0].strip()
-            if not text_to_save:
-                text_to_save = raw_text
-                
-            # เอาข้อความที่ "แก้ไขคำผิดแล้ว" เก็บเข้าคลัง เพื่อให้ตอนสรุปผลได้ข้อมูลที่แม่นยำ
-            meeting_transcripts.append(text_to_save)
-            
-            # ให้ AI จำบริบทย้อนหลังเพิ่มขึ้นนิดหน่อย (800 ตัวอักษร) จะได้ไม่ลืมว่าคุยเรื่องอะไรอยู่
-            last_context = (last_context + " | " + text_to_save)[-800:]
-            
-            print(f"🤖 [AI กรองแล้ว]: {filtered_text}\n" + "-"*50)
             return {"status": "success", "text": filtered_text}
             
         except Exception as e:
-            # Fallback: ถ้า Llama รวน ให้บันทึกและโชว์ข้อความดิบไปเลย ระบบจะได้ไม่พัง
-            meeting_transcripts.append(raw_text)
             return {"status": "success", "text": raw_text}
             
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.post("/api/meeting/summarize")
+async def summarize_meeting(persona: str = "standard"):
+    global meeting_transcripts, last_context, user_context_data
+    
+    if not meeting_transcripts:
+        return {"status": "empty", "message": "ไม่มีข้อความให้สรุปครับ"}
+        
+    full_text = "\n".join(meeting_transcripts)
+    system_prompt = PROMPTS.get(persona, PROMPTS["standard"])["summary"]
+    
+    rag_injection = ""
+    if user_context_data:
+        rag_injection = f"\n[ข้อมูลอ้างอิงของผู้ใช้]:\n{user_context_data}\n"
+    
+    try:
+        completion = client.chat.completions.create(
+            model="llama-3.3-70b-versatile", 
+            messages=[
+                {"role": "system", "content": system_prompt + "\n\nตอบเป็นภาษาไทยที่เป็นทางการ อ่านง่าย มี Emoji ประกอบหัวข้อตามความเหมาะสม" + rag_injection},
+                {"role": "user", "content": f"ข้อมูลดิบทั้งหมดที่คุยกัน:\n{full_text}"}
+            ],
+            temperature=0.3, 
+        )
+        final_summary = completion.choices[0].message.content
+        
+        # เคลียร์ข้อมูลทิ้งหลังสรุปผลเสร็จ
+        meeting_transcripts = []
+        last_context = "เพิ่งเริ่มการสนทนา"
+        user_context_data = "" 
+        
+        return {"status": "success", "summary": final_summary}
+        
     except Exception as e:
         return {"status": "error", "message": str(e)}
