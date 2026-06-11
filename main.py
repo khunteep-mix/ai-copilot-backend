@@ -89,74 +89,82 @@ async def receive_audio_chunk(file: UploadFile = File(...), persona: str = Form(
         if not raw_text:
             return {"status": "success", "text": ""}
         
-        print(f"📻 [Whisper ดิบ]: {raw_text}")
+        print(f"📻 [Whisper]: {raw_text}")
+        meeting_transcripts.append(raw_text)
+        
+        # กฎข้อ 2: ถ้าเป็นโหมด Podcast ให้คืนค่าซับไตเติ้ลเลย
+        if persona in PASSIVE_MODES:
+            return {"status": "success", "text": raw_text}
 
+        # กฎข้อ 1: โหมดผู้ช่วย ให้ AI วิเคราะห์ว่าควรตอบไหม (ไม่มี ✨)
         rag_injection = ""
         if user_context_data:
             rag_injection = f"\n[ข้อมูลอ้างอิงของผู้ใช้]:\n{user_context_data}\n"
 
-        # โหมดที่ไม่ต้องการให้ AI ตอบแทรก
-        PASSIVE_MODES = ["podcast", "student"]
-
-        # ----------------------------------------------------
-        # 🧠 ล็อคกรง AI: ให้กรองคำอย่างเดียว ห้ามแต่งเรื่อง!
-        # ----------------------------------------------------
         dynamic_system_prompt = f"""
-คุณคือตัวกรองคำผิดจากการถอดเสียง (Speech-to-text proofreader)
-ห้ามแต่งประโยคเพิ่ม ห้ามสนทนาโต้ตอบ ห้ามอธิบาย หน้าที่เดียวของคุณคือ "แก้คำที่สะกดผิดหรือฟังเพี้ยน" ให้ถูกต้องตามบริบท
-
-[บริบทการคุยก่อนหน้า]: {last_context[-500:]}
-{rag_injection}
-
-กฎเหล็กขั้นเด็ดขาด (ทำผิดคือพัง):
-1. ห้ามใส่คำนำหน้าเด็ดขาด (เช่น ห้ามพิมพ์ 'ข้อความที่แก้ไข:' หรือ 'คำตอบ:')
-2. ห้ามใส่เครื่องหมายอัญประกาศ (" ") ครอบข้อความ
-3. หากมีคำที่ฟังเพี้ยน ให้อนุมานจากบริบท (เช่นได้ยิน 'เอ็กเตอเวิด' ให้แก้เป็น 'Extrovert')
-4. ต้องคงความหมายและโครงสร้างประโยคเดิมของ "ข้อความดิบ" ไว้ทั้งหมด ห้ามแต่งเรื่อง หรือมโนเนื้อหาขึ้นมาใหม่เด็ดขาด
-"""
+        คุณคือผู้ช่วย AI อัจฉริยะในโหมด '{persona}'
+        ข้อความเรียลไทม์ที่เพิ่งพูด: "{raw_text}"
+        {rag_injection}
         
-        if persona not in PASSIVE_MODES:
-            dynamic_system_prompt += """
-5. พิเศษเฉพาะคุณ: ถ้า "ข้อความดิบ" มีลักษณะเป็น "คำถาม" หรือ "คำสั่ง" ที่เจาะจงถาม AI ให้คุณแก้คำผิดให้เสร็จก่อน แล้วขึ้นบรรทัดใหม่ พิมพ์ "💡 [AI]: " ตามด้วยคำตอบสั้นๆ (ไม่เกิน 2 ประโยค) 
-ถ้าไม่ใช่คำถาม ห้ามพิมพ์ "💡 [AI]: " เด็ดขาด
-"""
-
+        กฎเหล็กที่ต้องปฏิบัติอย่างเคร่งครัด:
+        1. วิเคราะห์ว่าข้อความนี้มี "คำถามที่ต้องการคำตอบ" "ข้อร้องขอ" หรือ "การสั่งงาน" หรือไม่
+        2. ถ้ามี: ให้พิมพ์ข้อความดิบ "{raw_text}" แล้วขึ้นบรรทัดใหม่ พิมพ์ "💡 [AI]: " ตามด้วยคำตอบหรือคำแนะนำของคุณ (ไม่เกิน 2 ประโยค)
+        3. ถ้าไม่มี (เป็นการพูดคุยทั่วไป): ให้ส่งข้อความดิบ "{raw_text}" กลับไปเลย ห้ามเติมคำอื่นเด็ดขาด
+        4. ห้ามใช้เครื่องหมาย ✨ (ดาววิบวับ) หรือโควตเด็ดเด็ดขาด 
+        """
+        
         try:
             correction = client.chat.completions.create(
                 model="llama-3.1-8b-instant", 
                 messages=[
                     {"role": "system", "content": dynamic_system_prompt},
-                    # บังคับให้ AI โฟกัสแค่ข้อความที่เพิ่งพูด
-                    {"role": "user", "content": f"ข้อความดิบ: {raw_text}"} 
+                    {"role": "user", "content": f"[Context ก่อนหน้า: {last_context}]\nวิเคราะห์และตอบตามกฎอย่างเคร่งครัด"}
                 ],
-                temperature=0.0, # 🌟 ปรับเป็น 0 เพื่อบังคับไม่ให้ AI มีจินตนาการแต่งเรื่องเอง
+                temperature=0.1, 
             )
             filtered_text = correction.choices[0].message.content.strip()
+            last_context = filtered_text[-300:]
+            print(f"🤖 [AI]: {filtered_text}\n" + "-"*50)
             
-            # 🛡️ ระบบตบเกรียน AI (ดักลบคำนำหน้าที่ AI อาจจะดื้อพิมพ์มา)
-            prefixes_to_remove = ["ข้อความที่แก้ไข", "ข้อความดิบ", "แก้ไข:", "ข้อความ:"]
-            for prefix in prefixes_to_remove:
-                if prefix in filtered_text[:20]: # เช็คแค่ช่วงต้นข้อความ
-                    filtered_text = filtered_text.split(":", 1)[-1].strip()
-            
-            # ถ้า AI ดื้อใส่เครื่องหมายคำพูด (" ") มาครอบ ให้ลบออก
-            if filtered_text.startswith('"') and filtered_text.endswith('"'):
-                filtered_text = filtered_text[1:-1].strip()
-
-            # แยกส่วนที่จะเอาไปเก็บเป็นประวัติ (ตัดคำตอบ AI ออก)
-            text_to_save = filtered_text.split("💡 [AI]:")[0].strip()
-            if not text_to_save:
-                text_to_save = raw_text
-                
-            meeting_transcripts.append(text_to_save)
-            last_context = (last_context + " | " + text_to_save)[-800:]
-            
-            print(f"🤖 [AI กรองแล้ว]: {filtered_text}\n" + "-"*50)
             return {"status": "success", "text": filtered_text}
             
         except Exception as e:
-            meeting_transcripts.append(raw_text)
             return {"status": "success", "text": raw_text}
             
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.post("/api/meeting/summarize")
+async def summarize_meeting(persona: str = "standard"):
+    global meeting_transcripts, last_context, user_context_data
+    
+    if not meeting_transcripts:
+        return {"status": "empty", "message": "ไม่มีข้อความให้สรุปครับ"}
+        
+    full_text = "\n".join(meeting_transcripts)
+    system_prompt = PROMPTS.get(persona, PROMPTS["standard"])["summary"]
+    
+    rag_injection = ""
+    if user_context_data:
+        rag_injection = f"\n[ข้อมูลอ้างอิงของผู้ใช้]:\n{user_context_data}\n"
+    
+    try:
+        completion = client.chat.completions.create(
+            model="llama-3.3-70b-versatile", 
+            messages=[
+                {"role": "system", "content": system_prompt + "\n\nตอบเป็นภาษาไทยที่เป็นทางการ อ่านง่าย มี Emoji ประกอบหัวข้อตามความเหมาะสม" + rag_injection},
+                {"role": "user", "content": f"ข้อมูลดิบทั้งหมดที่คุยกัน:\n{full_text}"}
+            ],
+            temperature=0.3, 
+        )
+        final_summary = completion.choices[0].message.content
+        
+        # เคลียร์ข้อมูลทิ้งหลังสรุปผลเสร็จ
+        meeting_transcripts = []
+        last_context = "เพิ่งเริ่มการสนทนา"
+        user_context_data = "" 
+        
+        return {"status": "success", "summary": final_summary}
+        
     except Exception as e:
         return {"status": "error", "message": str(e)}
