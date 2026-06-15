@@ -80,7 +80,7 @@ async def websocket_stream(websocket: WebSocket, session_id: str, persona: str =
     print(f"🔌 [WS Connected] Session: {session_id} | Mode: {persona} | Lang: {lang}")
     
     session = sessions[session_id]
-    dg_connection = deepgram.listen.live.v("1")
+    dg_connection = deepgram.listen.asynclive.v("1")
 
     # Callback เมื่อ Deepgram ส่งผลถอดความแบบ Real-time กลับมา
     async def on_transcript(self, result, **kwargs):
