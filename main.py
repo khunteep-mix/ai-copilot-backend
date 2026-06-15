@@ -179,7 +179,10 @@ async def websocket_stream(websocket: WebSocket, session_id: str, persona: str =
     except Exception as e:
         print(f"❌ WS Loop Error: {e}")
     finally:
-        await dg_connection.finish()
+        try:
+            await dg_connection.finish()
+        except Exception:
+            pass  # ข้าม Error ไปถ้าระบบยังไม่ทันสร้าง Socket
         print("🔒 ปิดการเชื่อมต่อ Deepgram Streaming เรียบร้อย")
 
 # ----------------------------------------------------------------------
