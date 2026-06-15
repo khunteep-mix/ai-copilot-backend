@@ -1,10 +1,12 @@
 import os
 import PyPDF2
-from fastapi import FastAPI, UploadFile, File, Form
+import json
+import asyncio
+from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from groq import Groq
-from deepgram import DeepgramClient, PrerecordedOptions, FileSource
+from deepgram import DeepgramClient, PrerecordedOptions, FileSource, LiveOptions, LiveTranscriptionEvents
 from collections import defaultdict
 
 load_dotenv()
@@ -36,9 +38,6 @@ PROMPTS = {
 
 PASSIVE_MODES = ["podcast"]
 
-# ---------------------------------------------------------
-# ระบบ Session Data (รองรับหลายเครื่องพร้อมกัน)
-# ---------------------------------------------------------
 class SessionData:
     def __init__(self):
         self.meeting_transcripts = []
@@ -46,159 +45,153 @@ class SessionData:
         self.user_context_data = ""
 
 sessions: dict[str, SessionData] = defaultdict(SessionData)
-# ---------------------------------------------------------
 
 @app.post("/api/upload/context")
-async def upload_context(
-    file: UploadFile = File(...),
-    session_id: str = Form(...) 
-):
+async def upload_context(file: UploadFile = File(...), session_id: str = Form(...)):
     try:
         content_text = ""
         if file.filename.lower().endswith('.pdf'):
             reader = PyPDF2.PdfReader(file.file)
             for page in reader.pages:
                 text = page.extract_text()
-                if text:
-                    content_text += text + "\n"
+                if text: content_text += text + "\n"
         else:
             content = await file.read()
             content_text = content.decode("utf-8")
         
         sessions[session_id].user_context_data = content_text[:5000]
-        print(f"✅ [RAG | {session_id}]: อัปโหลดข้อมูล Context สำเร็จ!")
-        return {"status": "success", "message": "อัปโหลดข้อมูลสำเร็จ AI พร้อมใช้งานข้อมูลนี้แล้ว"}
+        print(f"✅ [RAG | {session_id}]: อัปโหลด Context สำเร็จ")
+        return {"status": "success", "message": "อัปโหลดข้อมูลสำเร็จ AI พร้อมใช้งานแล้ว"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
 @app.post("/api/meeting/reset")
 async def reset_meeting(session_id: str = Form(...)): 
     sessions[session_id] = SessionData()
-    print(f"🔄 [System | {session_id}]: ล้างหน่วยความจำเริ่มการประชุมใหม่เรียบร้อย")
+    print(f"🔄 [System | {session_id}]: ล้างหน่วยความจำเรียบร้อย")
     return {"status": "success"}
 
-@app.post("/api/audio/chunk")
-async def receive_audio_chunk(
-    file: UploadFile = File(...), 
-    persona: str = Form("standard"),
-    session_id: str = Form(...),
-    lang: str = Form("th")
-):
-    audio_bytes = await file.read()
+# ----------------------------------------------------------------------
+# 🌐 REAL-TIME WEBSOCKET STREAMING ENDPOINT (แก้ปัญหาแยกผู้พูด)
+# ----------------------------------------------------------------------
+@app.websocket("/api/stream")
+async def websocket_stream(websocket: WebSocket, session_id: str, persona: str = "standard", lang: str = "th"):
+    await websocket.accept()
+    print(f"🔌 [WS Connected] Session: {session_id} | Mode: {persona} | Lang: {lang}")
     
-    if len(audio_bytes) < 1000:
-        return {"status": "skipped"}
+    session = sessions[session_id]
+    dg_connection = deepgram.listen.live.v("1")
 
-    session = sessions[session_id] 
+    # Callback เมื่อ Deepgram ส่งผลถอดความแบบ Real-time กลับมา
+    async def on_transcript(self, result, **kwargs):
+        try:
+            if not result.channel or not result.channel.alternatives:
+                return
+            
+            alt = result.channel.alternatives[0]
+            transcript = alt.transcript
+            if not transcript.strip():
+                return
+
+            # ทำงานเฉพาะประโยคที่ Deepgram มั่นใจแล้ว (is_final) เพื่อไม่ให้ซับไตเติ้ลแสดงซ้ำซ้อน
+            if result.is_final:
+                words = alt.words
+                current_speaker = words[0].speaker if words else 0
+                raw_text = f"[ผู้พูดที่ {current_speaker}]: {transcript}"
+                
+                print(f"📻 [Live Audio Stream]: {raw_text}")
+
+                if persona in PASSIVE_MODES:
+                    session.meeting_transcripts.append(raw_text)
+                    await websocket.send_json({"status": "transcript", "text": raw_text})
+                    return
+
+                # ระบบวิเคราะห์และตอบคำถามแบบเรียลไทม์ด้วย AI
+                rag_injection = f"\n[ข้อมูลอ้างอิงของผู้ใช้]:\n{session.user_context_data}\n" if session.user_context_data else ""
+                dynamic_system_prompt = f"""
+                คุณคือผู้ช่วย AI อัจฉริยะในโหมด '{persona}'
+                ข้อความเรียลไทม์ที่เพิ่งพูด:
+                {raw_text}
+                
+                {rag_injection}
+                
+                กฎเหล็กที่ต้องปฏิบัติอย่างเคร่งครัด:
+                1. ใช้ข้อมูล [ผู้พูดที่ X] จากข้อความเพื่อจัดระเบียบการสนทนา ถ้าบริบทชัดเจนคุณสามารถเปลี่ยนชื่อผู้พูดได้ (เช่น เปลี่ยนเป็น [ผู้สัมภาษณ์] หรือ [ลูกค้า])
+                2. วิเคราะห์ว่าข้อความนี้มี "คำถาม" หรือ "ข้อร้องขอ" หรือไม่
+                3. ถ้ามี: ให้พิมพ์ข้อความดิบพร้อมชื่อผู้พูด แล้วขึ้นบรรทัดใหม่ พิมพ์ "💡 [AI]: " ตามด้วยคำตอบของคุณ
+                4. ถ้าไม่มี (เป็นการพูดคุยทั่วไป): ให้พิมพ์ข้อความดิบพร้อมชื่อผู้พูด ห้ามเติมคำอธิบายอื่นเด็ดขาด
+                5. ห้ามใช้เครื่องหมาย ✨ (ดาววิบวับ) เด็ดขาด
+                """
+                
+                try:
+                    def run_groq():
+                        return client.chat.completions.create(
+                            model="llama-3.1-8b-instant", 
+                            messages=[
+                                {"role": "system", "content": dynamic_system_prompt},
+                                {"role": "user", "content": f"[Context ก่อนหน้า: {session.last_context}]\nตอบตามกฎอย่างเคร่งครัด"}
+                            ],
+                            temperature=0.1, 
+                        )
+                    # ใช้ asyncio.to_thread เพื่อป้องกันไม่ให้โมเดลบล็อกการทำงานหลักของ WebSocket
+                    correction = await asyncio.to_thread(run_groq)
+                    filtered_text = correction.choices[0].message.content.strip()
+                    
+                    session.last_context = filtered_text[-300:]
+                    session.meeting_transcripts.append(filtered_text)
+                    
+                    await websocket.send_json({"status": "transcript", "text": filtered_text})
+                except Exception as e:
+                    session.meeting_transcripts.append(raw_text)
+                    await websocket.send_json({"status": "transcript", "text": raw_text})
+        except Exception as e:
+            print(f"❌ Error inside DG Callback: {e}")
+
+    async def on_error(self, error, **kwargs):
+        print(f"🔴 Deepgram Live Error: {error}")
+
+    # ลงทะเบียน Event กิจกรรมของ Deepgram
+    dg_connection.on(LiveTranscriptionEvents.Transcript, on_transcript)
+    dg_connection.on(LiveTranscriptionEvents.Error, on_error)
+
+    # กำหนดค่าเริ่มต้นให้กับ Deepgram Live Streaming
+    options = LiveOptions(
+        model="nova-2",
+        language=None if lang == "detect" else lang,
+        detect_language=True if lang == "detect" else False,
+        smart_format=True,
+        diarize=True, # เปิดระบบแยกเสียงคนพูดแบบต่อเนื่อง
+        interim_results=False # แสดงผลลัพธ์เฉพาะประโยคที่จบสมบูรณ์แล้ว
+    )
+
+    await dg_connection.start(options)
 
     try:
-        payload: FileSource = {"buffer": audio_bytes}
-        
-        if lang == "detect":
-            options = PrerecordedOptions(
-                model="nova-2",
-                detect_language=True,
-                smart_format=True,
-                diarize=True,
-                punctuate=True
-            )
-        else:
-            options = PrerecordedOptions(
-                model="nova-2",
-                language=lang,
-                smart_format=True,
-                diarize=True,
-                punctuate=True
-            )
-        
-        response = await deepgram.listen.asyncrest.v("1").transcribe_file(payload, options)
-        
-        words = response.results.channels[0].alternatives[0].words
-        if not words:
-            return {"status": "success", "text": ""}
-            
-        current_speaker = words[0].speaker
-        speaker_text = ""
-        formatted_transcripts = []
-        
-        for word in words:
-            text_word = getattr(word, 'punctuated_word', word.word)
-            
-            if word.speaker == current_speaker:
-                speaker_text += text_word + " "
-            else:
-                formatted_transcripts.append(f"[ผู้พูดที่ {current_speaker}]: {speaker_text.strip()}")
-                current_speaker = word.speaker
-                speaker_text = text_word + " "
-                
-        if speaker_text:
-            formatted_transcripts.append(f"[ผู้พูดที่ {current_speaker}]: {speaker_text.strip()}")
-        
-        raw_text = "\n".join(formatted_transcripts)
-        print(f"📻 [Deepgram | {session_id}]:\n{raw_text}")
-        
-        if persona in PASSIVE_MODES:
-            session.meeting_transcripts.append(raw_text)
-            return {"status": "success", "text": raw_text}
-
-        rag_injection = f"\n[ข้อมูลอ้างอิงของผู้ใช้]:\n{session.user_context_data}\n" if session.user_context_data else ""
-
-        dynamic_system_prompt = f"""
-        คุณคือผู้ช่วย AI อัจฉริยะในโหมด '{persona}'
-        ข้อความเรียลไทม์ที่เพิ่งพูด:
-        {raw_text}
-        
-        {rag_injection}
-        
-        กฎเหล็กที่ต้องปฏิบัติอย่างเคร่งครัด:
-        1. ใช้ข้อมูล [ผู้พูดที่ X] จากข้อความเพื่อจัดระเบียบการสนทนา ถ้าบริบทชัดเจนคุณสามารถเปลี่ยนชื่อผู้พูดได้ (เช่น เปลี่ยนเป็น [ผู้สัมภาษณ์] หรือ [ลูกค้า])
-        2. วิเคราะห์ว่าข้อความนี้มี "คำถาม" หรือ "ข้อร้องขอ" หรือไม่
-        3. ถ้ามี: ให้พิมพ์ข้อความดิบพร้อมชื่อผู้พูด แล้วขึ้นบรรทัดใหม่ พิมพ์ "💡 [AI]: " ตามด้วยคำตอบของคุณ
-        4. ถ้าไม่มี (เป็นการพูดคุยทั่วไป): ให้พิมพ์ข้อความดิบพร้อมชื่อผู้พูด ห้ามเติมคำอธิบายอื่นเด็ดขาด
-        5. ห้ามใช้เครื่องหมาย ✨ (ดาววิบวับ) เด็ดขาด
-        """
-        
-        try:
-            correction = client.chat.completions.create(
-                model="llama-3.1-8b-instant", 
-                messages=[
-                    {"role": "system", "content": dynamic_system_prompt},
-                    {"role": "user", "content": f"[Context ก่อนหน้า: {session.last_context}]\nตอบตามกฎอย่างเคร่งครัด"}
-                ],
-                temperature=0.1, 
-            )
-            filtered_text = correction.choices[0].message.content.strip()
-            
-            session.last_context = filtered_text[-300:]
-            session.meeting_transcripts.append(filtered_text)
-            
-            print(f"🤖 [AI | {session_id}]: {filtered_text}\n" + "-"*50)
-            return {"status": "success", "text": filtered_text}
-            
-        except Exception as e:
-            session.meeting_transcripts.append(raw_text)
-            return {"status": "success", "text": raw_text}
-            
+        while True:
+            # รอรับข้อมูลดิบ (Binary) จากหน้าเว็บแล้วโยนเข้า Deepgram ทันที
+            data = await websocket.receive()
+            if "bytes" in data:
+                await dg_connection.send(data["bytes"])
+    except WebSocketDisconnect:
+        print(f"🔌 [WS Disconnected] ปิดท่อสื่อสารของเซสชัน {session_id}")
     except Exception as e:
-        print(f"❌ Error in processing audio chunk: {str(e)}")
-        return {"status": "error", "message": str(e)}
+        print(f"❌ WS Loop Error: {e}")
+    finally:
+        await dg_connection.finish()
+        print("🔒 ปิดการเชื่อมต่อ Deepgram Streaming เรียบร้อย")
+
+# ----------------------------------------------------------------------
 
 @app.post("/api/meeting/summarize")
-async def summarize_meeting(
-    persona: str = Form("standard"),
-    session_id: str = Form(...) 
-):
+async def summarize_meeting(persona: str = Form("standard"), session_id: str = Form(...)):
     session = sessions[session_id]
-    
     if not session.meeting_transcripts:
         return {"status": "empty", "message": "ไม่มีข้อความให้สรุปครับ"}
         
     full_text = "\n".join(session.meeting_transcripts)
     system_prompt = PROMPTS.get(persona, PROMPTS["standard"])["summary"]
     
-    rag_injection = ""
-    if session.user_context_data:
-        rag_injection = f"\n[ข้อมูลอ้างอิงของผู้ใช้]:\n{session.user_context_data}\n"
+    rag_injection = f"\n[ข้อมูลอ้างอิงของผู้ใช้]:\n{session.user_context_data}\n" if session.user_context_data else ""
     
     try:
         completion = client.chat.completions.create(
@@ -210,10 +203,7 @@ async def summarize_meeting(
             temperature=0.3, 
         )
         final_summary = completion.choices[0].message.content
-        
-        sessions[session_id] = SessionData()
-        
+        sessions[session_id] = SessionData() # รีเซ็ตหลังสรุปเสร็จ
         return {"status": "success", "summary": final_summary}
-        
     except Exception as e:
         return {"status": "error", "message": str(e)}
