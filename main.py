@@ -154,11 +154,13 @@ async def websocket_stream(websocket: WebSocket, session_id: str, persona: str =
     dg_connection.on(LiveTranscriptionEvents.Transcript, on_transcript)
     dg_connection.on(LiveTranscriptionEvents.Error, on_error)
 
+    # โหมด Live Streaming ไม่รองรับ Auto-Detect เราจึงให้ fallback กลับไปเป็นโหมด "th" ซึ่งรองรับทั้งไทยและอังกฤษ
+    actual_lang = "th" if lang == "detect" else lang
+
     # กำหนดค่าเริ่มต้นให้กับ Deepgram Live Streaming
     options = LiveOptions(
         model="nova-2",
-        language=None if lang == "detect" else lang,
-        detect_language=True if lang == "detect" else False,
+        language=actual_lang,
         smart_format=True,
         diarize=True, # เปิดระบบแยกเสียงคนพูดแบบต่อเนื่อง
         interim_results=False # แสดงผลลัพธ์เฉพาะประโยคที่จบสมบูรณ์แล้ว
