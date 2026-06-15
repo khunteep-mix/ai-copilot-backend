@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from groq import Groq
 from deepgram import DeepgramClient, PrerecordedOptions, FileSource
-from collections import defaultdict # 🆕 Import เพิ่มสำหรับสร้าง Dictionary ที่ตั้งค่าเริ่มต้นให้อัตโนมัติ
+from collections import defaultdict
 
 load_dotenv()
 app = FastAPI()
@@ -37,7 +37,7 @@ PROMPTS = {
 PASSIVE_MODES = ["podcast"]
 
 # ---------------------------------------------------------
-# 🆕 1. โครงสร้างข้อมูลสำหรับ 1 Session
+# ระบบ Session Data (รองรับหลายเครื่องพร้อมกัน)
 # ---------------------------------------------------------
 class SessionData:
     def __init__(self):
@@ -45,14 +45,13 @@ class SessionData:
         self.last_context = "เพิ่งเริ่มการสนทนา"
         self.user_context_data = ""
 
-# สร้าง "สมุด" เก็บข้อมูลแต่ละ Session
 sessions: dict[str, SessionData] = defaultdict(SessionData)
 # ---------------------------------------------------------
 
 @app.post("/api/upload/context")
 async def upload_context(
     file: UploadFile = File(...),
-    session_id: str = Form(...) # 🆕 รับ session_id 
+    session_id: str = Form(...) 
 ):
     try:
         content_text = ""
@@ -66,7 +65,6 @@ async def upload_context(
             content = await file.read()
             content_text = content.decode("utf-8")
         
-        # เก็บข้อมูลลงเฉพาะกล่องของ Session นั้น
         sessions[session_id].user_context_data = content_text[:5000]
         print(f"✅ [RAG | {session_id}]: อัปโหลดข้อมูล Context สำเร็จ!")
         return {"status": "success", "message": "อัปโหลดข้อมูลสำเร็จ AI พร้อมใช้งานข้อมูลนี้แล้ว"}
@@ -74,8 +72,7 @@ async def upload_context(
         return {"status": "error", "message": str(e)}
 
 @app.post("/api/meeting/reset")
-async def reset_meeting(session_id: str = Form(...)): # 🆕 รับ session_id
-    # ล้างข้อมูลด้วยการสร้างกล่องใหม่ทับกล่องเก่าของ Session นั้น
+async def reset_meeting(session_id: str = Form(...)): 
     sessions[session_id] = SessionData()
     print(f"🔄 [System | {session_id}]: ล้างหน่วยความจำเริ่มการประชุมใหม่เรียบร้อย")
     return {"status": "success"}
@@ -85,23 +82,22 @@ async def receive_audio_chunk(
     file: UploadFile = File(...), 
     persona: str = Form("standard"),
     session_id: str = Form(...),
-    lang: str = Form("th") # 💡 รับค่าภาษามาจากหน้าเว็บ
+    lang: str = Form("th")
 ):
     audio_bytes = await file.read()
     
     if len(audio_bytes) < 1000:
         return {"status": "skipped"}
 
-    session = sessions[session_id]
+    session = sessions[session_id] 
 
     try:
         payload: FileSource = {"buffer": audio_bytes}
         
-        # 💡 เช็คว่าผู้ใช้เลือก Auto-Detect หรือไม่
         if lang == "detect":
             options = PrerecordedOptions(
                 model="nova-2",
-                detect_language=True, # เปิดโหมดจับภาษาอัตโนมัติ
+                detect_language=True,
                 smart_format=True,
                 diarize=True,
                 punctuate=True
@@ -109,7 +105,7 @@ async def receive_audio_chunk(
         else:
             options = PrerecordedOptions(
                 model="nova-2",
-                language=lang, # ใช้ภาษา th หรือ en ตามที่ผู้ใช้เลือก
+                language=lang,
                 smart_format=True,
                 diarize=True,
                 punctuate=True
@@ -173,7 +169,6 @@ async def receive_audio_chunk(
             )
             filtered_text = correction.choices[0].message.content.strip()
             
-            # อัปเดตข้อมูลของ Session นั้นๆ
             session.last_context = filtered_text[-300:]
             session.meeting_transcripts.append(filtered_text)
             
@@ -191,7 +186,7 @@ async def receive_audio_chunk(
 @app.post("/api/meeting/summarize")
 async def summarize_meeting(
     persona: str = Form("standard"),
-    session_id: str = Form(...) # 🆕 รับ session_id
+    session_id: str = Form(...) 
 ):
     session = sessions[session_id]
     
@@ -216,7 +211,6 @@ async def summarize_meeting(
         )
         final_summary = completion.choices[0].message.content
         
-        # สรุปเสร็จ ล้างข้อมูลห้องนี้ทิ้งได้เลย
         sessions[session_id] = SessionData()
         
         return {"status": "success", "summary": final_summary}
