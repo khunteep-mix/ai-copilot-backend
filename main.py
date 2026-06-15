@@ -84,26 +84,37 @@ async def reset_meeting(session_id: str = Form(...)): # 🆕 รับ session_i
 async def receive_audio_chunk(
     file: UploadFile = File(...), 
     persona: str = Form("standard"),
-    session_id: str = Form(...) # 🆕 รับ session_id
+    session_id: str = Form(...),
+    lang: str = Form("th") # 💡 รับค่าภาษามาจากหน้าเว็บ
 ):
     audio_bytes = await file.read()
     
     if len(audio_bytes) < 1000:
         return {"status": "skipped"}
 
-    session = sessions[session_id] # 🆕 ดึงข้อมูลเฉพาะของคนๆ นี้มาใช้
+    session = sessions[session_id]
 
     try:
         payload: FileSource = {"buffer": audio_bytes}
-        options = PrerecordedOptions(
-            model="nova-2",
-            language="th",
-            smart_format=True,
-            diarize=True,
-            punctuate=True
-        )
         
-        # ⚡️ ใช้ asyncrest เพื่อแก้ปัญหาคอขวด 
+        # 💡 เช็คว่าผู้ใช้เลือก Auto-Detect หรือไม่
+        if lang == "detect":
+            options = PrerecordedOptions(
+                model="nova-2",
+                detect_language=True, # เปิดโหมดจับภาษาอัตโนมัติ
+                smart_format=True,
+                diarize=True,
+                punctuate=True
+            )
+        else:
+            options = PrerecordedOptions(
+                model="nova-2",
+                language=lang, # ใช้ภาษา th หรือ en ตามที่ผู้ใช้เลือก
+                smart_format=True,
+                diarize=True,
+                punctuate=True
+            )
+        
         response = await deepgram.listen.asyncrest.v("1").transcribe_file(payload, options)
         
         words = response.results.channels[0].alternatives[0].words
