@@ -104,7 +104,7 @@ async def receive_audio_chunk(
         )
         
         # ⚡️ ใช้ asyncrest เพื่อแก้ปัญหาคอขวด 
-        response = await deepgram.listen.asyncrest.v("1").analyze_file(payload, options)
+        response = await deepgram.listen.asyncrest.v("1").transcribe_file(payload, options)
         
         words = response.results.channels[0].alternatives[0].words
         if not words:
