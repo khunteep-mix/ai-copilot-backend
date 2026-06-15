@@ -43,6 +43,9 @@ class SessionData:
         self.meeting_transcripts = []
         self.last_context = "เพิ่งเริ่มการสนทนา"
         self.user_context_data = ""
+        # 🆕 เพิ่ม 2 ตัวแปรนี้เพื่อรวบรวมประโยคและจำคนพูด
+        self.sentence_buffer = ""
+        self.current_speaker = 0
 
 sessions: dict[str, SessionData] = defaultdict(SessionData)
 
@@ -83,6 +86,7 @@ async def websocket_stream(websocket: WebSocket, session_id: str, persona: str =
     dg_connection = deepgram.listen.asynclive.v("1")
 
     # Callback เมื่อ Deepgram ส่งผลถอดความแบบ Real-time กลับมา
+    # Callback เมื่อ Deepgram ส่งผลถอดความแบบ Real-time กลับมา
     async def on_transcript(self, result, **kwargs):
         try:
             if not result.channel or not result.channel.alternatives:
@@ -90,23 +94,36 @@ async def websocket_stream(websocket: WebSocket, session_id: str, persona: str =
             
             alt = result.channel.alternatives[0]
             transcript = alt.transcript
-            if not transcript.strip():
-                return
-
-            # ทำงานเฉพาะประโยคที่ Deepgram มั่นใจแล้ว (is_final) เพื่อไม่ให้ซับไตเติ้ลแสดงซ้ำซ้อน
-            if result.is_final:
+            
+            # 1. รวบรวมข้อความที่นิ่งแล้ว (is_final) เข้าไปในถังพัก (Buffer)
+            if result.is_final and transcript.strip():
                 words = alt.words
-                current_speaker = words[0].speaker if words else 0
-                raw_text = f"[ผู้พูดที่ {current_speaker}]: {transcript}"
+                # อัปเดตผู้พูด (ถ้าก้อนนี้ไม่มีข้อมูลคนพูด ให้ใช้คนเดิมที่พูดค้างไว้)
+                if words and hasattr(words[0], 'speaker'):
+                    session.current_speaker = words[0].speaker
                 
-                print(f"📻 [Live Audio Stream]: {raw_text}")
+                # เอาคำมาต่อกัน
+                session.sentence_buffer += " " + transcript.strip()
+            
+            # 2. เช็คว่าผู้พูด "พูดจบประโยค/เว้นวรรคหายใจ" หรือยัง (speech_final)
+            if getattr(result, 'speech_final', False):
+                final_text = session.sentence_buffer.strip()
+                if not final_text:
+                    return # ถ้าไม่มีข้อความให้ข้ามไป
+                
+                # สร้างข้อความแบบเต็มประโยค
+                raw_text = f"[ผู้พูดที่ {session.current_speaker}]: {final_text}"
+                print(f"📻 [Live Sentence]: {raw_text}")
+                
+                # ล้างถังพักทิ้งเพื่อเตรียมรับประโยคถัดไป
+                session.sentence_buffer = ""
 
                 if persona in PASSIVE_MODES:
                     session.meeting_transcripts.append(raw_text)
                     await websocket.send_json({"status": "transcript", "text": raw_text})
                     return
 
-                # ระบบวิเคราะห์และตอบคำถามแบบเรียลไทม์ด้วย AI
+                # --- (โค้ดดึง AI ตอบคำถามของคุณอยู่ต่อจากตรงนี้ คงเดิมไว้ได้เลยครับ) ---
                 rag_injection = f"\n[ข้อมูลอ้างอิงของผู้ใช้]:\n{session.user_context_data}\n" if session.user_context_data else ""
                 dynamic_system_prompt = f"""
                 คุณคือผู้ช่วย AI อัจฉริยะในโหมด '{persona}'
@@ -162,8 +179,9 @@ async def websocket_stream(websocket: WebSocket, session_id: str, persona: str =
         model="nova-2",
         language=actual_lang,
         smart_format=True,
-        diarize=True, # เปิดระบบแยกเสียงคนพูดแบบต่อเนื่อง
-        interim_results=False # แสดงผลลัพธ์เฉพาะประโยคที่จบสมบูรณ์แล้ว
+        diarize=True, 
+        interim_results=False,
+        endpointing=500 # 🆕 สั่งให้ระบบรอคนหยุดพูด (เสียงเงียบ 500ms) ถึงจะตัดจบ 1 ประโยค
     )
 
     await dg_connection.start(options)
